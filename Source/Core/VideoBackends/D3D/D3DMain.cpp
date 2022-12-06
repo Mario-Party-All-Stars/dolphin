@@ -79,7 +79,6 @@ void VideoBackend::FillBackendInfo()
   g_Config.backend_info.bSupportsExclusiveFullscreen = true;
   g_Config.backend_info.bSupportsDualSourceBlend = true;
   g_Config.backend_info.bSupportsPrimitiveRestart = true;
-  g_Config.backend_info.bSupportsOversizedViewports = false;
   g_Config.backend_info.bSupportsGeometryShaders = true;
   g_Config.backend_info.bSupportsComputeShaders = false;
   g_Config.backend_info.bSupports3DVision = true;
@@ -112,6 +111,8 @@ void VideoBackend::FillBackendInfo()
   g_Config.backend_info.bSupportsLodBiasInSampler = true;
   g_Config.backend_info.bSupportsLogicOp = D3D::SupportsLogicOp(g_Config.iAdapter);
   g_Config.backend_info.bSupportsSettingObjectNames = true;
+  g_Config.backend_info.bSupportsPartialMultisampleResolve = true;
+  g_Config.backend_info.bSupportsDynamicVertexLoader = false;
 
   g_Config.backend_info.Adapters = D3DCommon::GetAdapterNames();
   g_Config.backend_info.AAModes = D3D::GetAAModes(g_Config.iAdapter);

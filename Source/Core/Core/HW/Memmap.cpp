@@ -12,6 +12,7 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <tuple>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -21,6 +22,7 @@
 #include "Common/Swap.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
+#include "Core/Core.h"
 #include "Core/HW/AudioInterface.h"
 #include "Core/HW/DSP.h"
 #include "Core/HW/DVD/DVDInterface.h"
@@ -45,6 +47,8 @@ namespace Memory
 // Store the MemArena here
 u8* physical_base = nullptr;
 u8* logical_base = nullptr;
+u8* physical_page_mappings_base = nullptr;
+u8* logical_page_mappings_base = nullptr;
 static bool is_fastmem_arena_initialized = false;
 
 // The MemArena class
@@ -71,7 +75,6 @@ static u32 s_fakevmem_size;
 static u32 s_fakevmem_mask;
 static u32 s_L1_cache_size;
 static u32 s_L1_cache_mask;
-static u32 s_io_size;
 // s_exram_size is the amount allocated by the emulator, whereas s_exram_size_real
 // is what gets used by emulated software.  If using retail IOS, it will
 // always be set to 64MB.
@@ -107,10 +110,6 @@ u32 GetL1CacheMask()
 {
   return s_L1_cache_mask;
 }
-u32 GetIOSize()
-{
-  return s_io_size;
-}
 u32 GetExRamSizeReal()
 {
   return s_exram_size_real;
@@ -127,35 +126,29 @@ u32 GetExRamMask()
 // MMIO mapping object.
 std::unique_ptr<MMIO::Mapping> mmio_mapping;
 
-static std::unique_ptr<MMIO::Mapping> InitMMIO()
+static void InitMMIO(bool is_wii)
 {
-  auto mmio = std::make_unique<MMIO::Mapping>();
+  mmio_mapping = std::make_unique<MMIO::Mapping>();
 
-  CommandProcessor::RegisterMMIO(mmio.get(), 0x0C000000);
-  PixelEngine::RegisterMMIO(mmio.get(), 0x0C001000);
-  VideoInterface::RegisterMMIO(mmio.get(), 0x0C002000);
-  ProcessorInterface::RegisterMMIO(mmio.get(), 0x0C003000);
-  MemoryInterface::RegisterMMIO(mmio.get(), 0x0C004000);
-  DSP::RegisterMMIO(mmio.get(), 0x0C005000);
-  DVDInterface::RegisterMMIO(mmio.get(), 0x0C006000);
-  SerialInterface::RegisterMMIO(mmio.get(), 0x0C006400);
-  ExpansionInterface::RegisterMMIO(mmio.get(), 0x0C006800);
-  AudioInterface::RegisterMMIO(mmio.get(), 0x0C006C00);
-
-  return mmio;
-}
-
-static std::unique_ptr<MMIO::Mapping> InitMMIOWii()
-{
-  auto mmio = InitMMIO();
-
-  IOS::RegisterMMIO(mmio.get(), 0x0D000000);
-  DVDInterface::RegisterMMIO(mmio.get(), 0x0D006000);
-  SerialInterface::RegisterMMIO(mmio.get(), 0x0D006400);
-  ExpansionInterface::RegisterMMIO(mmio.get(), 0x0D006800);
-  AudioInterface::RegisterMMIO(mmio.get(), 0x0D006C00);
-
-  return mmio;
+  auto& system = Core::System::GetInstance();
+  system.GetCommandProcessor().RegisterMMIO(system, mmio_mapping.get(), 0x0C000000);
+  PixelEngine::RegisterMMIO(mmio_mapping.get(), 0x0C001000);
+  VideoInterface::RegisterMMIO(mmio_mapping.get(), 0x0C002000);
+  ProcessorInterface::RegisterMMIO(mmio_mapping.get(), 0x0C003000);
+  MemoryInterface::RegisterMMIO(mmio_mapping.get(), 0x0C004000);
+  DSP::RegisterMMIO(mmio_mapping.get(), 0x0C005000);
+  DVDInterface::RegisterMMIO(mmio_mapping.get(), 0x0C006000, false);
+  SerialInterface::RegisterMMIO(mmio_mapping.get(), 0x0C006400);
+  ExpansionInterface::RegisterMMIO(mmio_mapping.get(), 0x0C006800);
+  AudioInterface::RegisterMMIO(mmio_mapping.get(), 0x0C006C00);
+  if (is_wii)
+  {
+    IOS::RegisterMMIO(mmio_mapping.get(), 0x0D000000);
+    DVDInterface::RegisterMMIO(mmio_mapping.get(), 0x0D006000, true);
+    SerialInterface::RegisterMMIO(mmio_mapping.get(), 0x0D006400);
+    ExpansionInterface::RegisterMMIO(mmio_mapping.get(), 0x0D006800);
+    AudioInterface::RegisterMMIO(mmio_mapping.get(), 0x0D006C00);
+  }
 }
 
 bool IsInitialized()
@@ -228,6 +221,9 @@ static std::array<PhysicalMemoryRegion, 4> s_physical_regions;
 
 static std::vector<LogicalMemoryView> logical_mapped_entries;
 
+static std::array<void*, PowerPC::BAT_PAGE_COUNT> s_physical_page_mappings;
+static std::array<void*, PowerPC::BAT_PAGE_COUNT> s_logical_page_mappings;
+
 void Init()
 {
   const auto get_mem1_size = [] {
@@ -247,18 +243,18 @@ void Init()
   s_fakevmem_mask = GetFakeVMemSize() - 1;
   s_L1_cache_size = 0x00040000;
   s_L1_cache_mask = GetL1CacheSize() - 1;
-  s_io_size = 0x00010000;
   s_exram_size_real = get_mem2_size();
   s_exram_size = MathUtil::NextPowerOf2(GetExRamSizeReal());
   s_exram_mask = GetExRamSize() - 1;
 
-  s_physical_regions[0] = {&m_pRAM, 0x00000000, GetRamSize(), PhysicalMemoryRegion::ALWAYS, false};
-  s_physical_regions[1] = {&m_pL1Cache, 0xE0000000, GetL1CacheSize(), PhysicalMemoryRegion::ALWAYS,
-                           false};
-  s_physical_regions[2] = {&m_pFakeVMEM, 0x7E000000, GetFakeVMemSize(),
-                           PhysicalMemoryRegion::FAKE_VMEM, false};
-  s_physical_regions[3] = {&m_pEXRAM, 0x10000000, GetExRamSize(), PhysicalMemoryRegion::WII_ONLY,
-                           false};
+  s_physical_regions[0] = PhysicalMemoryRegion{
+      &m_pRAM, 0x00000000, GetRamSize(), PhysicalMemoryRegion::ALWAYS, 0, false};
+  s_physical_regions[1] = PhysicalMemoryRegion{
+      &m_pL1Cache, 0xE0000000, GetL1CacheSize(), PhysicalMemoryRegion::ALWAYS, 0, false};
+  s_physical_regions[2] = PhysicalMemoryRegion{
+      &m_pFakeVMEM, 0x7E000000, GetFakeVMemSize(), PhysicalMemoryRegion::FAKE_VMEM, 0, false};
+  s_physical_regions[3] = PhysicalMemoryRegion{
+      &m_pEXRAM, 0x10000000, GetExRamSize(), PhysicalMemoryRegion::WII_ONLY, 0, false};
 
   const bool wii = SConfig::GetInstance().bWii;
   const bool mmu = Core::System::GetInstance().IsMMUMode();
@@ -285,6 +281,8 @@ void Init()
   }
   g_arena.GrabSHMSegment(mem_size);
 
+  s_physical_page_mappings.fill(nullptr);
+
   // Create an anonymous view of the physical memory
   for (const PhysicalMemoryRegion& region : s_physical_regions)
   {
@@ -300,12 +298,18 @@ void Init()
           region.physical_address, region.size);
       exit(0);
     }
+
+    for (u32 i = 0; i < region.size; i += PowerPC::BAT_PAGE_SIZE)
+    {
+      const size_t index = (i + region.physical_address) >> PowerPC::BAT_INDEX_SHIFT;
+      s_physical_page_mappings[index] = *region.out_pointer + i;
+    }
   }
 
-  if (wii)
-    mmio_mapping = InitMMIOWii();
-  else
-    mmio_mapping = InitMMIO();
+  physical_page_mappings_base = reinterpret_cast<u8*>(s_physical_page_mappings.data());
+  logical_page_mappings_base = reinterpret_cast<u8*>(s_logical_page_mappings.data());
+
+  InitMMIO(wii);
 
   Clear();
 
@@ -355,14 +359,14 @@ bool InitFastmemArena()
 
 void UpdateLogicalMemory(const PowerPC::BatTable& dbat_table)
 {
-  if (!is_fastmem_arena_initialized)
-    return;
-
   for (auto& entry : logical_mapped_entries)
   {
     g_arena.UnmapFromMemoryRegion(entry.mapped_pointer, entry.mapped_size);
   }
   logical_mapped_entries.clear();
+
+  s_logical_page_mappings.fill(nullptr);
+
   for (u32 i = 0; i < dbat_table.size(); ++i)
   {
     if (dbat_table[i] & PowerPC::BAT_PHYSICAL_BIT)
@@ -383,19 +387,27 @@ void UpdateLogicalMemory(const PowerPC::BatTable& dbat_table)
         if (intersection_start < intersection_end)
         {
           // Found an overlapping region; map it.
-          u32 position = physical_region.shm_position + intersection_start - mapping_address;
-          u8* base = logical_base + logical_address + intersection_start - translated_address;
-          u32 mapped_size = intersection_end - intersection_start;
 
-          void* mapped_pointer = g_arena.MapInMemoryRegion(position, mapped_size, base);
-          if (!mapped_pointer)
+          if (is_fastmem_arena_initialized)
           {
-            PanicAlertFmt("Memory::UpdateLogicalMemory(): Failed to map memory region at 0x{:08X} "
-                          "(size 0x{:08X}) into logical fastmem region at 0x{:08X}.",
-                          intersection_start, mapped_size, logical_address);
-            exit(0);
+            u32 position = physical_region.shm_position + intersection_start - mapping_address;
+            u8* base = logical_base + logical_address + intersection_start - translated_address;
+            u32 mapped_size = intersection_end - intersection_start;
+
+            void* mapped_pointer = g_arena.MapInMemoryRegion(position, mapped_size, base);
+            if (!mapped_pointer)
+            {
+              PanicAlertFmt(
+                  "Memory::UpdateLogicalMemory(): Failed to map memory region at 0x{:08X} "
+                  "(size 0x{:08X}) into logical fastmem region at 0x{:08X}.",
+                  intersection_start, mapped_size, logical_address);
+              exit(0);
+            }
+            logical_mapped_entries.push_back({mapped_pointer, mapped_size});
           }
-          logical_mapped_entries.push_back({mapped_pointer, mapped_size});
+
+          s_logical_page_mappings[i] =
+              *physical_region.out_pointer + intersection_start - mapping_address;
         }
       }
     }
@@ -404,15 +416,50 @@ void UpdateLogicalMemory(const PowerPC::BatTable& dbat_table)
 
 void DoState(PointerWrap& p)
 {
-  bool wii = SConfig::GetInstance().bWii;
-  p.DoArray(m_pRAM, GetRamSize());
-  p.DoArray(m_pL1Cache, GetL1CacheSize());
+  const u32 current_ram_size = GetRamSize();
+  const u32 current_l1_cache_size = GetL1CacheSize();
+  const bool current_have_fake_vmem = !!m_pFakeVMEM;
+  const u32 current_fake_vmem_size = current_have_fake_vmem ? GetFakeVMemSize() : 0;
+  const bool current_have_exram = !!m_pEXRAM;
+  const u32 current_exram_size = current_have_exram ? GetExRamSize() : 0;
+
+  u32 state_ram_size = current_ram_size;
+  u32 state_l1_cache_size = current_l1_cache_size;
+  bool state_have_fake_vmem = current_have_fake_vmem;
+  u32 state_fake_vmem_size = current_fake_vmem_size;
+  bool state_have_exram = current_have_exram;
+  u32 state_exram_size = current_exram_size;
+
+  p.Do(state_ram_size);
+  p.Do(state_l1_cache_size);
+  p.Do(state_have_fake_vmem);
+  p.Do(state_fake_vmem_size);
+  p.Do(state_have_exram);
+  p.Do(state_exram_size);
+
+  // If we're loading a savestate and any of the above differs between the savestate and the current
+  // state, cancel the load. This is technically possible to support but would require a bunch of
+  // reinitialization of things that depend on these.
+  if (std::tie(state_ram_size, state_l1_cache_size, state_have_fake_vmem, state_fake_vmem_size,
+               state_have_exram, state_exram_size) !=
+      std::tie(current_ram_size, current_l1_cache_size, current_have_fake_vmem,
+               current_fake_vmem_size, current_have_exram, current_exram_size))
+  {
+    Core::DisplayMessage("State is incompatible with current memory settings (MMU and/or memory "
+                         "overrides). Aborting load state.",
+                         3000);
+    p.SetVerifyMode();
+    return;
+  }
+
+  p.DoArray(m_pRAM, current_ram_size);
+  p.DoArray(m_pL1Cache, current_l1_cache_size);
   p.DoMarker("Memory RAM");
-  if (m_pFakeVMEM)
-    p.DoArray(m_pFakeVMEM, GetFakeVMemSize());
+  if (current_have_fake_vmem)
+    p.DoArray(m_pFakeVMEM, current_fake_vmem_size);
   p.DoMarker("Memory FakeVMEM");
-  if (wii)
-    p.DoArray(m_pEXRAM, GetExRamSize());
+  if (current_have_exram)
+    p.DoArray(m_pEXRAM, current_exram_size);
   p.DoMarker("Memory EXRAM");
 }
 

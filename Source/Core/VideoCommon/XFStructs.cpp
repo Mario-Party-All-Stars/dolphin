@@ -15,6 +15,7 @@
 #include "VideoCommon/Fifo.h"
 #include "VideoCommon/GeometryShaderManager.h"
 #include "VideoCommon/PixelShaderManager.h"
+#include "VideoCommon/VertexLoaderManager.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VertexShaderManager.h"
 #include "VideoCommon/XFMemory.h"
@@ -53,6 +54,7 @@ static void XFRegWritten(u32 address, u32 value)
     }
 
     case XFMEM_VTXSPECS:  //__GXXfVtxSpecs, wrote 0004
+      VertexLoaderManager::g_needs_cp_xf_consistency_check = true;
       break;
 
     case XFMEM_SETNUMCHAN:
@@ -102,9 +104,11 @@ static void XFRegWritten(u32 address, u32 value)
 
     case XFMEM_SETMATRIXINDA:
       VertexShaderManager::SetTexMatrixChangedA(value);
+      VertexLoaderManager::g_needs_cp_xf_consistency_check = true;
       break;
     case XFMEM_SETMATRIXINDB:
       VertexShaderManager::SetTexMatrixChangedB(value);
+      VertexLoaderManager::g_needs_cp_xf_consistency_check = true;
       break;
 
     case XFMEM_SETVIEWPORT:
@@ -321,17 +325,17 @@ std::pair<std::string, std::string> GetXFRegInfo(u32 address, u32 value)
 
   case XFMEM_SETCHAN0_AMBCOLOR:
     return std::make_pair(RegName(XFMEM_SETCHAN0_AMBCOLOR),
-                          fmt::format("Channel 0 Ambient Color: {:06x}", value));
+                          fmt::format("Channel 0 Ambient Color: {:08x}", value));
   case XFMEM_SETCHAN1_AMBCOLOR:
     return std::make_pair(RegName(XFMEM_SETCHAN1_AMBCOLOR),
-                          fmt::format("Channel 1 Ambient Color: {:06x}", value));
+                          fmt::format("Channel 1 Ambient Color: {:08x}", value));
 
   case XFMEM_SETCHAN0_MATCOLOR:
     return std::make_pair(RegName(XFMEM_SETCHAN0_MATCOLOR),
-                          fmt::format("Channel 0 Material Color: {:06x}", value));
+                          fmt::format("Channel 0 Material Color: {:08x}", value));
   case XFMEM_SETCHAN1_MATCOLOR:
     return std::make_pair(RegName(XFMEM_SETCHAN1_MATCOLOR),
-                          fmt::format("Channel 1 Material Color: {:06x}", value));
+                          fmt::format("Channel 1 Material Color: {:08x}", value));
 
   case XFMEM_SETCHAN0_COLOR:  // Channel Color
     return std::make_pair(RegName(XFMEM_SETCHAN0_COLOR),
@@ -474,8 +478,8 @@ std::string GetXFMemName(u32 address)
   }
   else if (address >= XFMEM_POSTMATRICES && address < XFMEM_POSTMATRICES_END)
   {
-    const u32 row = (address - XFMEM_POSMATRICES) / 4;
-    const u32 col = (address - XFMEM_POSMATRICES) % 4;
+    const u32 row = (address - XFMEM_POSTMATRICES) / 4;
+    const u32 col = (address - XFMEM_POSTMATRICES) % 4;
     return fmt::format("Post matrix row {:2d} col {:2d}", row, col);
   }
   else if (address >= XFMEM_LIGHTS && address < XFMEM_LIGHTS_END)
@@ -508,9 +512,9 @@ std::string GetXFMemName(u32 address)
     case 15:
       // Yagcd says light dir or "1/2 angle", dolphin has union for ddir or shalfangle.
       // It would make sense if d stood for direction and s for specular, but it's ddir and
-      // shalfhangle that have the comment "specular lights only", both at the same offset,
+      // shalfangle that have the comment "specular lights only", both at the same offset,
       // while dpos and sdir have none...
-      return fmt::format("Light {0} {1} direction or half hangle {1}", light, "xyz"[offset - 13]);
+      return fmt::format("Light {0} {1} direction or half angle {1}", light, "xyz"[offset - 13]);
     }
   }
   else

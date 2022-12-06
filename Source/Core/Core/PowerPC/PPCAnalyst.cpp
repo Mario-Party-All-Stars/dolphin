@@ -367,6 +367,7 @@ void FindFunctions(u32 startAddr, u32 endAddr, PPCSymbolDB* func_db)
 
   // Step 2:
   func_db->FillInCallers();
+  func_db->Index();
 
   int numLeafs = 0, numNice = 0, numUnNice = 0;
   int numTimer = 0, numRFI = 0, numStraightLeaf = 0;
@@ -520,8 +521,8 @@ void PPCAnalyzer::ReorderInstructions(u32 instructions, CodeOp* code) const
     ReorderInstructionsCore(instructions, code, false, ReorderType::CMP);
 }
 
-void PPCAnalyzer::SetInstructionStats(CodeBlock* block, CodeOp* code, const GekkoOPInfo* opinfo,
-                                      u32 index) const
+void PPCAnalyzer::SetInstructionStats(CodeBlock* block, CodeOp* code,
+                                      const GekkoOPInfo* opinfo) const
 {
   code->wantsCR0 = false;
   code->wantsCR1 = false;
@@ -532,9 +533,6 @@ void PPCAnalyzer::SetInstructionStats(CodeBlock* block, CodeOp* code, const Gekk
     first_fpu_instruction = !block->m_fpa->any;
     block->m_fpa->any = true;
   }
-
-  if (opinfo->flags & FL_TIMER)
-    block->m_gpa->anyTimer = true;
 
   // Does the instruction output CR0?
   if (opinfo->flags & FL_RC_BIT)
@@ -585,39 +583,32 @@ void PPCAnalyzer::SetInstructionStats(CodeBlock* block, CodeOp* code, const Gekk
   if (opinfo->flags & FL_OUT_A)
   {
     code->regsOut[code->inst.RA] = true;
-    block->m_gpa->SetOutputRegister(code->inst.RA, index);
   }
   if (opinfo->flags & FL_OUT_D)
   {
     code->regsOut[code->inst.RD] = true;
-    block->m_gpa->SetOutputRegister(code->inst.RD, index);
   }
   if ((opinfo->flags & FL_IN_A) || ((opinfo->flags & FL_IN_A0) && code->inst.RA != 0))
   {
     code->regsIn[code->inst.RA] = true;
-    block->m_gpa->SetInputRegister(code->inst.RA, index);
   }
   if (opinfo->flags & FL_IN_B)
   {
     code->regsIn[code->inst.RB] = true;
-    block->m_gpa->SetInputRegister(code->inst.RB, index);
   }
   if (opinfo->flags & FL_IN_C)
   {
     code->regsIn[code->inst.RC] = true;
-    block->m_gpa->SetInputRegister(code->inst.RC, index);
   }
   if (opinfo->flags & FL_IN_S)
   {
     code->regsIn[code->inst.RS] = true;
-    block->m_gpa->SetInputRegister(code->inst.RS, index);
   }
   if (code->inst.OPCD == 46)  // lmw
   {
     for (int iReg = code->inst.RD; iReg < 32; ++iReg)
     {
       code->regsOut[iReg] = true;
-      block->m_gpa->SetOutputRegister(iReg, index);
     }
   }
   else if (code->inst.OPCD == 47)  // stmw
@@ -625,7 +616,6 @@ void PPCAnalyzer::SetInstructionStats(CodeBlock* block, CodeOp* code, const Gekk
     for (int iReg = code->inst.RS; iReg < 32; ++iReg)
     {
       code->regsIn[iReg] = true;
-      block->m_gpa->SetInputRegister(iReg, index);
     }
   }
 
@@ -740,9 +730,6 @@ u32 PPCAnalyzer::Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer,
   block->m_gpa->any = true;
   block->m_fpa->any = false;
 
-  block->m_gpa->Clear();
-  block->m_fpa->Clear();
-
   // Set the blocks start address
   block->m_address = address;
 
@@ -785,7 +772,7 @@ u32 PPCAnalyzer::Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer,
     block->m_stats->numCycles += opinfo->numCycles;
     block->m_physical_addresses.insert(result.physical_address);
 
-    SetInstructionStats(block, &code[i], opinfo, static_cast<u32>(i));
+    SetInstructionStats(block, &code[i], opinfo);
 
     bool follow = false;
 
@@ -946,8 +933,8 @@ u32 PPCAnalyzer::Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer,
     op.gprDiscardable = gprDiscardable;
     op.fprDiscardable = fprDiscardable;
     op.fprInXmm = fprInXmm;
-    gprInUse |= op.regsIn;
-    fprInUse |= op.fregsIn;
+    gprInUse |= op.regsIn | op.regsOut;
+    fprInUse |= op.fregsIn | op.GetFregsOut();
     if (op.canEndBlock || op.canCauseException)
     {
       gprDiscardable = BitSet32{};
