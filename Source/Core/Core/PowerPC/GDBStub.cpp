@@ -37,6 +37,7 @@ typedef SSIZE_T ssize_t;
 #include "Core/PowerPC/Gekko.h"
 #include "Core/PowerPC/PPCCache.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/System.h"
 
 namespace GDBStub
 {
@@ -124,11 +125,11 @@ static void Hex2mem(u8* dst, u8* src, u32 len)
   }
 }
 
-static void UpdateCallback(u64 userdata, s64 cycles_late)
+static void UpdateCallback(Core::System& system, u64 userdata, s64 cycles_late)
 {
   ProcessCommands(false);
   if (IsActive())
-    CoreTiming::ScheduleEvent(GDB_UPDATE_CYCLES, s_update_event);
+    Core::System::GetInstance().GetCoreTiming().ScheduleEvent(GDB_UPDATE_CYCLES, s_update_event);
 }
 
 static u8 ReadByte()
@@ -1068,8 +1069,10 @@ static void InitGeneric(int domain, const sockaddr* server_addr, socklen_t serve
 #endif
   s_tmpsock = -1;
 
-  s_update_event = CoreTiming::RegisterEvent("GDBStubUpdate", UpdateCallback);
-  CoreTiming::ScheduleEvent(GDB_UPDATE_CYCLES, s_update_event);
+  auto& system = Core::System::GetInstance();
+  auto& core_timing = system.GetCoreTiming();
+  s_update_event = core_timing.RegisterEvent("GDBStubUpdate", UpdateCallback);
+  core_timing.ScheduleEvent(GDB_UPDATE_CYCLES, s_update_event);
   s_has_control = true;
 }
 

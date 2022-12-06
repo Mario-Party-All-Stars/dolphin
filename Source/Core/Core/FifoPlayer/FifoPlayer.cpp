@@ -23,6 +23,7 @@
 #include "Core/Host.h"
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/System.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/VideoCommon.h"
@@ -54,6 +55,11 @@ public:
   OPCODE_CALLBACK(void OnCommand(const u8* data, u32 size));
 
   OPCODE_CALLBACK(CPState& GetCPState()) { return m_cpmem; }
+
+  OPCODE_CALLBACK(u32 GetVertexSize(u8 vat))
+  {
+    return VertexLoaderBase::GetVertexSize(GetCPState().vtx_desc, GetCPState().vtx_attr[vat]);
+  }
 
   bool m_start_of_primitives = false;
   bool m_end_of_primitives = false;
@@ -503,6 +509,8 @@ void FifoPlayer::WriteFifo(const u8* data, u32 start, u32 end)
   u32 written = start;
   u32 lastBurstEnd = end - 1;
 
+  auto& core_timing = Core::System::GetInstance().GetCoreTiming();
+
   // Write up to 256 bytes at a time
   while (written < end)
   {
@@ -510,8 +518,8 @@ void FifoPlayer::WriteFifo(const u8* data, u32 start, u32 end)
     {
       if (CPU::GetState() != CPU::State::Running)
         break;
-      CoreTiming::Idle();
-      CoreTiming::Advance();
+      core_timing.Idle();
+      core_timing.Advance();
     }
 
     u32 burstEnd = std::min(written + 255, lastBurstEnd);
@@ -528,7 +536,7 @@ void FifoPlayer::WriteFifo(const u8* data, u32 start, u32 end)
     m_ElapsedCycles = elapsedCycles;
 
     PowerPC::ppcState.downcount -= cyclesUsed;
-    CoreTiming::Advance();
+    core_timing.Advance();
   }
 }
 
@@ -591,9 +599,9 @@ void FifoPlayer::ClearEfb()
   UPE_Copy copy = bpmem.triggerEFBCopy;
   copy.clamp_top = false;
   copy.clamp_bottom = false;
-  copy.yuv = false;
+  copy.unknown_bit = false;
   copy.target_pixel_format = static_cast<u32>(EFBCopyFormat::RGBA8) << 1;
-  copy.gamma = 0;
+  copy.gamma = GammaCorrection::Gamma1_0;
   copy.half_scale = false;
   copy.scale_invert = false;
   copy.clear = true;
@@ -707,11 +715,13 @@ void FifoPlayer::FlushWGP()
 
 void FifoPlayer::WaitForGPUInactive()
 {
+  auto& core_timing = Core::System::GetInstance().GetCoreTiming();
+
   // Sleep while the GPU is active
   while (!IsIdleSet() && CPU::GetState() != CPU::State::PowerDown)
   {
-    CoreTiming::Idle();
-    CoreTiming::Advance();
+    core_timing.Idle();
+    core_timing.Advance();
   }
 }
 

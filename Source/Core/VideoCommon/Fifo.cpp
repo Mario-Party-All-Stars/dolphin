@@ -26,6 +26,7 @@
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/DataReader.h"
+#include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/OpcodeDecoding.h"
 #include "VideoCommon/VertexLoaderManager.h"
 #include "VideoCommon/VertexManagerBase.h"
@@ -94,7 +95,7 @@ void DoState(PointerWrap& p)
   p.DoPointer(write_ptr, s_video_buffer);
   s_video_buffer_write_ptr = write_ptr;
   p.DoPointer(s_video_buffer_read_ptr, s_video_buffer);
-  if (p.mode == PointerWrap::MODE_READ && s_use_deterministic_gpu_thread)
+  if (p.IsReadMode() && s_use_deterministic_gpu_thread)
   {
     // We're good and paused, right?
     s_video_buffer_seen_ptr = s_video_buffer_pp_read_ptr = s_video_buffer_read_ptr;
@@ -162,8 +163,12 @@ void Shutdown()
 // Created to allow for self shutdown.
 void ExitGpuLoop()
 {
+  auto& system = Core::System::GetInstance();
+  auto& command_processor = system.GetCommandProcessor();
+  auto& fifo = command_processor.GetFifo();
+
   // This should break the wait loop in CPU thread
-  CommandProcessor::fifo.bFF_GPReadEnable.store(0, std::memory_order_relaxed);
+  fifo.bFF_GPReadEnable.store(0, std::memory_order_relaxed);
   FlushGpu();
 
   // Terminate GPU thread loop
@@ -346,11 +351,13 @@ void RunGpuLoop()
         }
         else
         {
-          CommandProcessor::SCPFifoStruct& fifo = CommandProcessor::fifo;
-          CommandProcessor::SetCPStatusFromGPU();
+          auto& system = Core::System::GetInstance();
+          auto& command_processor = system.GetCommandProcessor();
+          auto& fifo = command_processor.GetFifo();
+          command_processor.SetCPStatusFromGPU(system);
 
           // check if we are able to run this buffer
-          while (!CommandProcessor::IsInterruptWaiting() &&
+          while (!command_processor.IsInterruptWaiting() &&
                  fifo.bFF_GPReadEnable.load(std::memory_order_relaxed) &&
                  fifo.CPReadWriteDistance.load(std::memory_order_relaxed) && !AtBreakpoint())
           {
@@ -386,7 +393,7 @@ void RunGpuLoop()
                                            std::memory_order_relaxed);
             }
 
-            CommandProcessor::SetCPStatusFromGPU();
+            command_processor.SetCPStatusFromGPU(system);
 
             if (s_config_sync_gpu)
             {
@@ -415,6 +422,7 @@ void RunGpuLoop()
           // The fifo is empty and it's unlikely we will get any more work in the near future.
           // Make sure VertexManager finishes drawing any primitives it has stored in it's buffer.
           g_vertex_manager->Flush();
+          g_framebuffer_manager->RefreshPeekCache();
         }
       },
       100);
@@ -438,7 +446,9 @@ void GpuMaySleep()
 
 bool AtBreakpoint()
 {
-  CommandProcessor::SCPFifoStruct& fifo = CommandProcessor::fifo;
+  auto& system = Core::System::GetInstance();
+  auto& command_processor = system.GetCommandProcessor();
+  const auto& fifo = command_processor.GetFifo();
   return fifo.bFF_BPEnable.load(std::memory_order_relaxed) &&
          (fifo.CPReadPointer.load(std::memory_order_relaxed) ==
           fifo.CPBreakpoint.load(std::memory_order_relaxed));
@@ -446,7 +456,8 @@ bool AtBreakpoint()
 
 void RunGpu()
 {
-  const bool is_dual_core = Core::System::GetInstance().IsDualCoreMode();
+  auto& system = Core::System::GetInstance();
+  const bool is_dual_core = system.IsDualCoreMode();
 
   // wake up GPU thread
   if (is_dual_core && !s_use_deterministic_gpu_thread)
@@ -460,14 +471,17 @@ void RunGpu()
     if (s_syncing_suspended)
     {
       s_syncing_suspended = false;
-      CoreTiming::ScheduleEvent(GPU_TIME_SLOT_SIZE, s_event_sync_gpu, GPU_TIME_SLOT_SIZE);
+      system.GetCoreTiming().ScheduleEvent(GPU_TIME_SLOT_SIZE, s_event_sync_gpu,
+                                           GPU_TIME_SLOT_SIZE);
     }
   }
 }
 
 static int RunGpuOnCpu(int ticks)
 {
-  CommandProcessor::SCPFifoStruct& fifo = CommandProcessor::fifo;
+  auto& system = Core::System::GetInstance();
+  auto& command_processor = system.GetCommandProcessor();
+  auto& fifo = command_processor.GetFifo();
   bool reset_simd_state = false;
   int available_ticks = int(ticks * s_config_sync_gpu_overclock) + s_sync_ticks.load();
   while (fifo.bFF_GPReadEnable.load(std::memory_order_relaxed) &&
@@ -508,7 +522,7 @@ static int RunGpuOnCpu(int ticks)
     fifo.CPReadWriteDistance.fetch_sub(GPFifo::GATHER_PIPE_SIZE, std::memory_order_relaxed);
   }
 
-  CommandProcessor::SetCPStatusFromGPU();
+  command_processor.SetCPStatusFromGPU(system);
 
   if (reset_simd_state)
   {
@@ -593,12 +607,12 @@ static int WaitForGpuThread(int ticks)
   return GPU_TIME_SLOT_SIZE;
 }
 
-static void SyncGPUCallback(u64 ticks, s64 cyclesLate)
+static void SyncGPUCallback(Core::System& system, u64 ticks, s64 cyclesLate)
 {
   ticks += cyclesLate;
   int next = -1;
 
-  if (!Core::System::GetInstance().IsDualCoreMode() || s_use_deterministic_gpu_thread)
+  if (!system.IsDualCoreMode() || s_use_deterministic_gpu_thread)
   {
     next = RunGpuOnCpu((int)ticks);
   }
@@ -609,7 +623,7 @@ static void SyncGPUCallback(u64 ticks, s64 cyclesLate)
 
   s_syncing_suspended = next < 0;
   if (!s_syncing_suspended)
-    CoreTiming::ScheduleEvent(next, s_event_sync_gpu, next);
+    system.GetCoreTiming().ScheduleEvent(next, s_event_sync_gpu, next);
 }
 
 void SyncGPUForRegisterAccess()
@@ -625,7 +639,8 @@ void SyncGPUForRegisterAccess()
 // Initialize GPU - CPU thread syncing, this gives us a deterministic way to start the GPU thread.
 void Prepare()
 {
-  s_event_sync_gpu = CoreTiming::RegisterEvent("SyncGPUCallback", SyncGPUCallback);
+  s_event_sync_gpu =
+      Core::System::GetInstance().GetCoreTiming().RegisterEvent("SyncGPUCallback", SyncGPUCallback);
   s_syncing_suspended = true;
 }
 }  // namespace Fifo
